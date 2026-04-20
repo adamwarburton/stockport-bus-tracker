@@ -121,16 +121,80 @@ def _in_poll_window():
 
 # --- WiFi --------------------------------------------------------------------
 
-_WIFI_ATTEMPT_TIMEOUT_MS = 20_000
+def _configured_networks():
+    """Normalise WIFI_CONFIG into a list of {ssid, psk} dicts.
+
+    Accepts either the new NETWORKS list shape or the legacy top-level
+    SSID/PSK globals (wrapped into a one-element list). Empty/missing
+    entries are dropped so the caller can treat empty-list as "nothing
+    configured".
+    """
+    networks = getattr(WIFI_CONFIG, "NETWORKS", None)
+    if networks:
+        return [n for n in networks if n.get("ssid")]
+    ssid = getattr(WIFI_CONFIG, "SSID", "")
+    psk = getattr(WIFI_CONFIG, "PSK", "")
+    return [{"ssid": ssid, "psk": psk}] if ssid else []
+
+
+def _scan_visible(wlan):
+    """Return {ssid: strongest_rssi} for nearby APs. Empty dict if scan fails."""
+    try:
+        scan = wlan.scan()
+    except Exception as e:
+        print("WiFi scan failed: {}".format(e))
+        return {}
+    out = {}
+    for ap in scan:
+        try:
+            ssid = ap[0].decode("utf-8")
+        except Exception:
+            continue
+        if not ssid:
+            continue
+        rssi = ap[3]
+        if ssid not in out or rssi > out[ssid]:
+            out[ssid] = rssi
+    return out
+
+
+def _attempt_connect(wlan, ticker, ssid, psk, timeout_sec=20):
+    """Try one SSID/PSK. Return True on success, False on timeout/failure.
+
+    Keeps the ticker scrolling during the wait so the display stays alive.
+    """
+    try:
+        wlan.disconnect()
+    except Exception:
+        pass
+    utime.sleep_ms(300)
+    try:
+        wlan.connect(ssid, psk)
+    except Exception as e:
+        print("WiFi connect() raised for '{}': {}".format(ssid, e))
+        return False
+
+    start = utime.ticks_ms()
+    while not wlan.isconnected():
+        # Keep the scroll alive during connect.
+        for _ in range(25):
+            ticker.tick(config.SCROLL_SPEED_PX)
+            utime.sleep_ms(config.SCROLL_TICK_MS)
+        # Status codes: -1 fail, -2 no matching SSID, -3 bad password.
+        s = wlan.status()
+        if s in (-1, -2, -3):
+            print("WiFi status {} for '{}', giving up".format(s, ssid))
+            return False
+        if utime.ticks_diff(utime.ticks_ms(), start) > timeout_sec * 1000:
+            print("WiFi connect timeout for '{}'".format(ssid))
+            return False
+    return True
 
 
 def connect_wifi(ticker):
-    """Block until WiFi is up. Updates the ticker so the user sees progress.
+    """Scan, then try each configured network strongest-first.
 
-    Each outer loop calls wlan.connect() once, then polls status for up to
-    ~20s while ticking the display. If it still isn't up we cycle the
-    interface and try again -- calling connect() repeatedly on every tick
-    makes some MicroPython builds grumpy.
+    Loops forever until connected. Returns the WLAN handle.
     """
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
@@ -138,39 +202,54 @@ def connect_wifi(ticker):
         wlan.config(pm=0xa11140)  # disable powersave -- more reliable connect
     except Exception:
         pass
-    country = getattr(WIFI_CONFIG, "COUNTRY", "GB")
     try:
-        network.country(country)
+        network.country(getattr(WIFI_CONFIG, "COUNTRY", "GB"))
     except Exception:
         pass
 
-    ticker.set_spans(dsp.compose_fallback("CONNECTING..."))
-    print("WiFi: connecting to '{}'".format(WIFI_CONFIG.SSID))
-
-    while not wlan.isconnected():
-        try:
-            wlan.connect(WIFI_CONFIG.SSID, WIFI_CONFIG.PSK)
-        except Exception as e:
-            print("WiFi connect() raised: {}".format(e))
-
-        deadline = utime.ticks_add(utime.ticks_ms(), _WIFI_ATTEMPT_TIMEOUT_MS)
-        while utime.ticks_diff(deadline, utime.ticks_ms()) > 0:
-            if wlan.isconnected():
-                break
+    configured = _configured_networks()
+    if not configured:
+        print("WiFi: no networks configured in WIFI_CONFIG.py")
+        ticker.set_spans(dsp.compose_fallback("NO WIFI CONFIGURED"))
+        # Nothing we can do -- keep scrolling so the device isn't a brick.
+        while True:
             ticker.tick(config.SCROLL_SPEED_PX)
             utime.sleep_ms(config.SCROLL_TICK_MS)
-        if wlan.isconnected():
-            break
 
-        print("WiFi: attempt timed out, cycling interface")
-        ticker.set_spans(dsp.compose_fallback("WIFI DOWN  RECONNECTING"))
+    while True:
+        ticker.set_spans(dsp.compose_fallback("SCANNING..."))
+        visible = _scan_visible(wlan)
+        print("Visible SSIDs: {}".format(sorted(visible.keys())))
+
+        # Visible configured networks, strongest signal first.
+        ranked = [(visible[c["ssid"]], c) for c in configured if c["ssid"] in visible]
+        ranked.sort(key=lambda x: x[0], reverse=True)
+
+        # Try configured-but-invisible networks last (might be hidden SSIDs).
+        for cfg in configured:
+            if cfg["ssid"] not in visible:
+                ranked.append((-999, cfg))
+
+        for rssi, cfg in ranked:
+            label = cfg["ssid"][:12].upper()
+            ticker.set_spans(dsp.compose_fallback("WIFI: " + label))
+            print("Trying '{}' (rssi={})".format(cfg["ssid"], rssi))
+            if _attempt_connect(wlan, ticker, cfg["ssid"], cfg["psk"]):
+                print("WiFi: connected to '{}', ifconfig={}".format(
+                    cfg["ssid"], wlan.ifconfig(),
+                ))
+                return wlan
+
+        # Everything failed. Cycle the interface and try again after a pause.
+        print("All networks failed, cycling interface")
+        ticker.set_spans(dsp.compose_fallback("NO WIFI FOUND  RETRYING"))
         try:
             wlan.active(False)
-            utime.sleep(2)
-            wlan.active(True)
-        except Exception as e:
-            print("WiFi interface cycle raised: {}".format(e))
-            utime.sleep(2)
+        except Exception:
+            pass
+        utime.sleep(5)
+        wlan.active(True)
+        utime.sleep(25)
 
     print("WiFi: connected, ifconfig={}".format(wlan.ifconfig()))
     return wlan
