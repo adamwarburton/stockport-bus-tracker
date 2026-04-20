@@ -121,8 +121,17 @@ def _in_poll_window():
 
 # --- WiFi --------------------------------------------------------------------
 
+_WIFI_ATTEMPT_TIMEOUT_MS = 20_000
+
+
 def connect_wifi(ticker):
-    """Block until WiFi is up. Updates the ticker so the user sees progress."""
+    """Block until WiFi is up. Updates the ticker so the user sees progress.
+
+    Each outer loop calls wlan.connect() once, then polls status for up to
+    ~20s while ticking the display. If it still isn't up we cycle the
+    interface and try again -- calling connect() repeatedly on every tick
+    makes some MicroPython builds grumpy.
+    """
     wlan = network.WLAN(network.STA_IF)
     wlan.active(True)
     try:
@@ -138,25 +147,30 @@ def connect_wifi(ticker):
     ticker.set_spans(dsp.compose_fallback("CONNECTING..."))
     print("WiFi: connecting to '{}'".format(WIFI_CONFIG.SSID))
 
-    attempts = 0
     while not wlan.isconnected():
-        if not wlan.isconnected() and wlan.status() <= 0:
-            try:
-                wlan.connect(WIFI_CONFIG.SSID, WIFI_CONFIG.PSK)
-            except Exception as e:
-                print("WiFi connect() raised: {}".format(e))
-        # Tick the display a few times so it keeps scrolling during connect.
-        for _ in range(25):
+        try:
+            wlan.connect(WIFI_CONFIG.SSID, WIFI_CONFIG.PSK)
+        except Exception as e:
+            print("WiFi connect() raised: {}".format(e))
+
+        deadline = utime.ticks_add(utime.ticks_ms(), _WIFI_ATTEMPT_TIMEOUT_MS)
+        while utime.ticks_diff(deadline, utime.ticks_ms()) > 0:
+            if wlan.isconnected():
+                break
             ticker.tick(config.SCROLL_SPEED_PX)
             utime.sleep_ms(config.SCROLL_TICK_MS)
-        attempts += 1
-        if attempts > 40:
-            print("WiFi: stuck, cycling interface")
-            ticker.set_spans(dsp.compose_fallback("WIFI DOWN  RECONNECTING"))
+        if wlan.isconnected():
+            break
+
+        print("WiFi: attempt timed out, cycling interface")
+        ticker.set_spans(dsp.compose_fallback("WIFI DOWN  RECONNECTING"))
+        try:
             wlan.active(False)
             utime.sleep(2)
             wlan.active(True)
-            attempts = 0
+        except Exception as e:
+            print("WiFi interface cycle raised: {}".format(e))
+            utime.sleep(2)
 
     print("WiFi: connected, ifconfig={}".format(wlan.ifconfig()))
     return wlan
@@ -174,6 +188,18 @@ def _compose_for(first, second):
         and first["minutes_until_leave"] <= config.URGENT_FLASH_THRESHOLD
     )
     return dsp.compose_normal(first, second, clock), urgent
+
+
+def _refresh_display(ticker, status, first, second):
+    """Push a new span set into the ticker. Only call when the content
+    actually changes -- set_spans resets the scroll position."""
+    if status == "OUTSIDE_HOURS":
+        ticker.set_spans(dsp.compose_fallback("OUTSIDE HOURS", _hhmm_now()))
+    elif status == "OFFLINE":
+        ticker.set_spans(dsp.compose_fallback("OFFLINE  RETRYING", _hhmm_now()))
+    else:
+        spans, urgent = _compose_for(first, second)
+        ticker.set_spans(spans, urgent=urgent)
 
 
 def _decrement_cached(first, second):
@@ -214,17 +240,20 @@ def run():
                         width=GalacticUnicorn.WIDTH,
                         height=GalacticUnicorn.HEIGHT)
 
-    connect_wifi(ticker)
+    wlan = connect_wifi(ticker)
     sync_clock()
 
     first = None
     second = None
     last_poll_ms = -10**9  # force immediate poll on first iteration
     last_second_ms = utime.ticks_ms()
-    last_minute_mark = utime.localtime()[4]
-    status = "OK"  # OK | OFFLINE | OUTSIDE_HOURS
+    last_minute_mark = -1   # sentinel -> forces first-minute render
+    status = "OK"           # OK | OFFLINE | OUTSIDE_HOURS
 
-    # Initial message before the first poll completes.
+    # Initial message before the first poll completes. Set once here; we only
+    # call set_spans() again when the visible content actually changes (minute
+    # rollover, poll result, or status transition). set_spans() resets the
+    # scroll position, so calling it every second makes the message restart.
     ticker.set_spans(dsp.compose_fallback("STARTING..."))
 
     while True:
@@ -233,26 +262,17 @@ def run():
         # Scroll every frame.
         ticker.tick(config.SCROLL_SPEED_PX)
 
-        # Per-second: refresh the clock in the rendered message.
+        # Per-second: look for a minute rollover. Clock and countdown only
+        # change once a minute, so no need to re-render more often than that.
         if utime.ticks_diff(now_ms, last_second_ms) >= 1000:
             last_second_ms = now_ms
-            # Per-minute: decrement the countdown so we stay live between polls.
             current_minute = utime.localtime()[4]
             if current_minute != last_minute_mark:
+                if last_minute_mark != -1:
+                    # Real minute tick -- decrement cached countdowns.
+                    first, second = _decrement_cached(first, second)
                 last_minute_mark = current_minute
-                first, second = _decrement_cached(first, second)
-
-            if status == "OUTSIDE_HOURS":
-                ticker.set_spans(
-                    dsp.compose_fallback("OUTSIDE HOURS", _hhmm_now())
-                )
-            elif status == "OFFLINE":
-                ticker.set_spans(
-                    dsp.compose_fallback("OFFLINE  RETRYING", _hhmm_now())
-                )
-            else:
-                spans, urgent = _compose_for(first, second)
-                ticker.set_spans(spans, urgent=urgent)
+                _refresh_display(ticker, status, first, second)
 
         # Poll the API on schedule.
         if utime.ticks_diff(now_ms, last_poll_ms) >= config.POLL_INTERVAL_SECONDS * 1000:
@@ -271,7 +291,17 @@ def run():
                 except Exception as e:
                     status = "OFFLINE"
                     print("[{}] poll failed: {}".format(_hhmm_now(), e))
+                    # If WiFi dropped out from under us, bring it back up.
+                    try:
+                        if not wlan.isconnected():
+                            print("[{}] WiFi dropped, reconnecting".format(_hhmm_now()))
+                            wlan = connect_wifi(ticker)
+                    except Exception as re:
+                        print("WiFi reconnect raised: {}".format(re))
                 gc.collect()
+            # Fresh poll result (or status change) -- refresh the display now
+            # rather than waiting up to 60s for the next minute rollover.
+            _refresh_display(ticker, status, first, second)
 
         utime.sleep_ms(config.SCROLL_TICK_MS)
 

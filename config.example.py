@@ -44,8 +44,9 @@ POLL_WINDOW = (7, 20)
 # Amber -- classic bus/rail dot-matrix colour.
 AMBER_RGB = (255, 140, 0)
 
-# Pixels per frame tick. Lower = smoother + slower scroll.
-SCROLL_SPEED_PX = 1
+# Pixels per frame tick. Lower = smoother + slower scroll. The full message is
+# roughly ~1000px so at 2px/tick and 40ms/tick it loops in ~20s.
+SCROLL_SPEED_PX = 2
 SCROLL_TICK_MS = 40
 
 # Flash the "LEAVE IN N MIN" section brighter when the soonest viable bus is

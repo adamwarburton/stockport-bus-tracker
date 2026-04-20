@@ -16,7 +16,7 @@ and 2px bottom margin in the 11px band -- comfy.
 
 # Amber -- classic bus/rail dot-matrix colour.
 AMBER = (255, 140, 0)
-AMBER_DIM = (90, 50, 0)
+AMBER_DIM = (140, 70, 0)       # readable through the acrylic diffuser
 AMBER_BRIGHT = (255, 200, 80)
 
 _FONT = "bitmap8"

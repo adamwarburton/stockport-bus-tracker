@@ -18,7 +18,7 @@ LEAVE IN 6 MIN · 385 TO MELLOR · NEXT 383 AT 17:42 · 16:51
 
 - [Pimoroni Galactic Unicorn (PIM734)](https://shop.pimoroni.com/products/galactic-unicorn)
   - Pico 2 W on board, 53x11 RGB LED matrix
-- A USB-C cable
+- A micro-USB cable (the Galactic Unicorn's jack is micro-USB, not USB-C)
 - WiFi
 
 ## One-time setup
