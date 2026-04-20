@@ -1,0 +1,15 @@
+# Secrets — real configs live on the device, only the .example.py templates are committed.
+config.py
+WIFI_CONFIG.py
+
+# Python / editor junk
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
