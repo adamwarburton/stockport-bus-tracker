@@ -41,11 +41,28 @@ cp config.example.py config.py
 
 ### 3. Fill in `WIFI_CONFIG.py`
 
+List every network you want the Pico to be able to connect to. On boot
+it scans for visible APs and picks the strongest match -- so the same
+Pico moves from home to office without needing re-flashing.
+
 ```python
-SSID = "MyHomeWiFi"
-PSK = "hunter2"
+NETWORKS = [
+    {"ssid": "MyHomeWiFi",   "psk": "hunter2"},
+    {"ssid": "OfficeWiFi",   "psk": "correct-horse-battery-staple"},
+    {"ssid": "PhoneHotspot", "psk": "backup-network"},
+]
+
 COUNTRY = "GB"
 ```
+
+Notes:
+
+- Order doesn't matter -- signal strength picks the winner.
+- Add phone hotspots, guest networks, anywhere you want the ticker to
+  just work.
+- The legacy `SSID = "..."` / `PSK = "..."` format is still accepted
+  for backwards compatibility; if `NETWORKS` is missing the Pico falls
+  back to those globals.
 
 ### 4. Fill in `config.py`
 
@@ -110,10 +127,21 @@ specifically? The stock Raspberry Pi build doesn't include the
 `galactic` or `picographics` modules. Also check brightness in
 `main.py` -- `unicorn.set_brightness(0.6)`.
 
-**`WIFI DOWN  RECONNECTING` forever.** Double-check SSID/PSK. The Pico
-2 W doesn't support WiFi 6-only networks; move it to a 2.4GHz network
-if yours is dual-band. `network.country("GB")` improves connect
-reliability on UK channels -- don't remove it.
+**`NO WIFI FOUND  RETRYING` forever.** None of the networks in
+`NETWORKS` are visible, or they are but the password is wrong. The
+Thonny shell prints the visible SSIDs each scan -- compare that list
+against `NETWORKS`. The Pico 2 W doesn't support WiFi 6-only networks;
+move it to a 2.4GHz network if yours is dual-band. `network.country("GB")`
+improves connect reliability on UK channels -- don't remove it.
+
+**Pico picked the wrong network.** If two networks with similar names
+are visible (e.g. a neighbour with a confusing SSID, or a guest SSID
+you didn't mean to join), remove the unwanted entry from `NETWORKS` --
+the scanner picks whichever matching SSID has the strongest signal, and
+that isn't always yours.
+
+**`NO WIFI CONFIGURED`.** `NETWORKS` is empty and the legacy `SSID`
+global isn't set either. Fill in `WIFI_CONFIG.py`.
 
 **`OFFLINE  RETRYING`.** The API call raised. Watch Thonny's shell for
 the exception. Most commonly:
