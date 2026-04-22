@@ -30,6 +30,8 @@ import config
 import WIFI_CONFIG
 import bus_api
 import display as dsp
+import buttons
+import weather_api
 
 
 # --- Time helpers ------------------------------------------------------------
@@ -311,7 +313,7 @@ def poll_api():
     )
 
 
-def run():
+def run_stockport():
     unicorn = GalacticUnicorn()
     graphics = PicoGraphics(display=DISPLAY_GALACTIC_UNICORN)
     unicorn.set_brightness(0.6)
@@ -383,6 +385,209 @@ def run():
             _refresh_display(ticker, status, first, second)
 
         utime.sleep_ms(config.SCROLL_TICK_MS)
+
+
+# --- Alexia profile ----------------------------------------------------------
+
+def _in_sleep_window(start_hm, end_hm):
+    """True if localtime is inside the Alexia sleep window.
+
+    Window crosses midnight (20:00 -> 06:30) so we handle both orderings.
+    """
+    lt = utime.localtime()
+    now = lt[3] * 60 + lt[4]
+    start = start_hm[0] * 60 + start_hm[1]
+    end = end_hm[0] * 60 + end_hm[1]
+    if start < end:
+        return start <= now < end
+    return now >= start or now < end
+
+
+def _poll_alexia_buses():
+    return bus_api.get_upcoming_departures(
+        app_id=config.APP_ID,
+        app_key=config.APP_KEY,
+        stop_atcocode=config.ALEXIA_STOP_ATCOCODE,
+        routes=config.ALEXIA_ROUTES,
+        count=config.ALEXIA_BUS_COUNT,
+        direction_contains=getattr(config, "ALEXIA_DIRECTION_CONTAINS", "") or None,
+        now_local_minutes=_now_local_minutes(),
+    )
+
+
+def _poll_alexia_weather():
+    return weather_api.get_weather(
+        lat=config.ALEXIA_WEATHER_LAT,
+        lon=config.ALEXIA_WEATHER_LON,
+    )
+
+
+def _tick_cached_bus(dep):
+    """Decrement the cached countdown; drop the entry once the bus has gone."""
+    dep = dict(dep)
+    dep["minutes_until_bus"] = dep["minutes_until_bus"] - 1
+    if dep["minutes_until_bus"] < 0:
+        return None
+    return dep
+
+
+def _alexia_redraw(ticker, upcoming, weather, colour, status, in_place):
+    """Push the current state into the ticker in Alexia's layout.
+
+    `in_place` preserves the scroll position (used for minute ticks and
+    colour cycling); a fresh poll calls with in_place=False so new content
+    gets a clean re-entry from the right edge.
+    """
+    clock = _hhmm_now()
+    if status == "OFFLINE" and not upcoming and weather is None:
+        spans = dsp.compose_alexia_fallback("OFFLINE  RETRYING", colour, clock)
+    else:
+        if upcoming:
+            route = upcoming[0]["route"]
+        elif config.ALEXIA_ROUTES:
+            route = config.ALEXIA_ROUTES[0]
+        else:
+            route = "BUS"
+        minutes = [b["minutes_until_bus"] for b in upcoming]
+        spans = dsp.compose_alexia(route, minutes, weather, clock, colour)
+    if in_place:
+        ticker.update_spans(spans)
+    else:
+        ticker.set_spans(spans)
+
+
+def run_alexia():
+    """Alexia's ticker: 192 times + weather + button-driven colour + sleep window."""
+    unicorn = GalacticUnicorn()
+    graphics = PicoGraphics(display=DISPLAY_GALACTIC_UNICORN)
+    day_brightness = 0.6
+    unicorn.set_brightness(day_brightness)
+
+    ticker = dsp.Ticker(graphics, unicorn,
+                        width=GalacticUnicorn.WIDTH,
+                        height=GalacticUnicorn.HEIGHT)
+
+    wlan = connect_wifi(ticker)
+    sync_clock()
+
+    palette = buttons.PaletteCycler(config.ALEXIA_PALETTE)
+    tap_a = buttons.TapDetector()
+    tap_b = buttons.TapDetector()
+
+    upcoming = []
+    weather = None
+    status = "OK"
+    last_bus_poll_ms = -10**9
+    last_wx_poll_ms = -10**9
+    last_second_ms = utime.ticks_ms()
+    last_minute_mark = -1
+    sleeping = False
+
+    ticker.set_spans(dsp.compose_alexia_fallback("STARTING...", palette.colour))
+
+    while True:
+        now_ms = utime.ticks_ms()
+        is_sleep_now = _in_sleep_window(
+            config.ALEXIA_SLEEP_START, config.ALEXIA_SLEEP_END,
+        )
+
+        # Sleep transitions -- blank the panel at night, wake to a forced poll.
+        if is_sleep_now and not sleeping:
+            print("[{}] Alexia: entering sleep".format(_hhmm_now()))
+            sleeping = True
+            unicorn.set_brightness(0)
+        elif not is_sleep_now and sleeping:
+            print("[{}] Alexia: waking".format(_hhmm_now()))
+            sleeping = False
+            unicorn.set_brightness(day_brightness)
+            last_bus_poll_ms = -10**9
+            last_wx_poll_ms = -10**9
+            last_minute_mark = -1
+
+        # Buttons -- poll every frame regardless of sleep so presses aren't lost,
+        # but treat them as no-ops when the panel is off.
+        a_pressed = unicorn.is_pressed(GalacticUnicorn.SWITCH_A)
+        b_pressed = unicorn.is_pressed(GalacticUnicorn.SWITCH_B)
+        event_a = tap_a.poll(a_pressed)
+        event_b = tap_b.poll(b_pressed)
+
+        if event_a == "single" and not sleeping:
+            new_colour = palette.advance()
+            print("[{}] Alexia: colour -> {}".format(_hhmm_now(), new_colour))
+            _alexia_redraw(ticker, upcoming, weather, palette.colour, status,
+                           in_place=True)
+        if event_b == "single" and not sleeping:
+            print("[{}] Alexia: force refresh".format(_hhmm_now()))
+            last_bus_poll_ms = -10**9
+            last_wx_poll_ms = -10**9
+
+        # Asleep: don't draw, don't poll -- just idle.
+        if sleeping:
+            utime.sleep_ms(config.SCROLL_TICK_MS)
+            continue
+
+        # Draw one frame.
+        ticker.tick(config.SCROLL_SPEED_PX)
+
+        # Per-second minute-rollover: decrement cached bus countdowns.
+        if utime.ticks_diff(now_ms, last_second_ms) >= 1000:
+            last_second_ms = now_ms
+            current_minute = utime.localtime()[4]
+            if current_minute != last_minute_mark:
+                if last_minute_mark != -1:
+                    upcoming = [d for d in (_tick_cached_bus(b) for b in upcoming)
+                                if d is not None]
+                last_minute_mark = current_minute
+                _alexia_redraw(ticker, upcoming, weather, palette.colour, status,
+                               in_place=True)
+
+        # Bus poll on schedule.
+        if utime.ticks_diff(now_ms, last_bus_poll_ms) >= config.POLL_INTERVAL_SECONDS * 1000:
+            last_bus_poll_ms = now_ms
+            try:
+                upcoming = _poll_alexia_buses()
+                status = "OK"
+                print("[{}] Alexia bus poll ok: {} deps".format(
+                    _hhmm_now(), len(upcoming),
+                ))
+            except Exception as e:
+                status = "OFFLINE"
+                print("[{}] Alexia bus poll failed: {}".format(_hhmm_now(), e))
+                try:
+                    if not wlan.isconnected():
+                        print("[{}] WiFi dropped, reconnecting".format(_hhmm_now()))
+                        wlan = connect_wifi(ticker)
+                except Exception as re:
+                    print("WiFi reconnect raised: {}".format(re))
+            gc.collect()
+            _alexia_redraw(ticker, upcoming, weather, palette.colour, status,
+                           in_place=False)
+
+        # Weather poll on its (slower) schedule.
+        if utime.ticks_diff(now_ms, last_wx_poll_ms) >= config.ALEXIA_WEATHER_POLL_SECONDS * 1000:
+            last_wx_poll_ms = now_ms
+            try:
+                weather = _poll_alexia_weather()
+                print("[{}] Alexia wx poll ok: {}".format(_hhmm_now(), weather))
+            except Exception as e:
+                print("[{}] Alexia wx poll failed: {}".format(_hhmm_now(), e))
+                # Keep whatever we had last; weather stays None if we never had one.
+            gc.collect()
+            _alexia_redraw(ticker, upcoming, weather, palette.colour, status,
+                           in_place=False)
+
+        utime.sleep_ms(config.SCROLL_TICK_MS)
+
+
+# --- Entry point -------------------------------------------------------------
+
+def run():
+    profile = getattr(config, "PROFILE", "stockport")
+    print("Starting profile: {}".format(profile))
+    if profile == "alexia":
+        run_alexia()
+    else:
+        run_stockport()
 
 
 if __name__ == "__main__":

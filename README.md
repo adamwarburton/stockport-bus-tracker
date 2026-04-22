@@ -1,18 +1,35 @@
 # Stockport Bus Ticker
 
-A tiny Pimoroni Galactic Unicorn displaying the next bus home from
-Stockport Grand Central Stop RR as a scrolling amber ticker.
+A tiny Pimoroni Galactic Unicorn displaying the next bus as a scrolling
+amber ticker. Two profiles live in one codebase -- flip `PROFILE` in
+`config.py` to pick.
+
+**Stockport profile** -- "leave in N minutes" for the commute home:
 
 ```
 LEAVE IN 6 MIN · 385 TO MELLOR · NEXT 383 AT 17:42 · 16:51
 ```
 
 - Shows the single soonest bus on my chosen routes (`385`, `383`)
-- Subtracts my 4-minute walk to the stop so the number is "leave
-  your desk in N minutes"
+- Subtracts my 4-minute walk so the number is "leave your desk in N"
 - Filters out buses you couldn't make on foot
 - Flashes the first segment brighter when it's 5 minutes or less
 - Fallback messages for no buses / offline / outside hours
+
+**Alexia profile** -- next three 192s toward Piccadilly + weather + sleep window:
+
+```
+192  10 MIN  12 MIN  15 MIN   12 RAIN IN 15 MIN ENDS IN 45 MIN   07:42
+```
+
+- Shows the next three upcoming departures for route `192` (direction-filtered)
+- Weather from Open-Meteo (free, no API key): temperature + one of three rain
+  states so the question "do I need an umbrella?" has a one-glance answer
+- Button `A` single-tap cycles through a colour palette (amber/red/green/blue/
+  purple/pink/white)
+- Button `B` single-tap forces an immediate refresh of buses + weather
+- LED panel blanks between 20:00 and 06:30 so it doesn't keep a kid awake;
+  device stays powered on and auto-refreshes on wake
 
 ## Hardware
 
@@ -71,7 +88,19 @@ Grab a free TransportAPI app id/key from
 the free tier (30 requests/day), bump `POLL_INTERVAL_SECONDS` to `600`
 and narrow `POLL_WINDOW` -- otherwise you'll blow the quota in an hour.
 
-Key settings:
+Pick a profile at the top of the file -- either `"stockport"` or `"alexia"`.
+Settings for the other profile are ignored, so it's fine to leave them
+filled in.
+
+**Shared**:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `PROFILE` | `"stockport"` | `"stockport"` or `"alexia"` |
+| `APP_ID` / `APP_KEY` | -- | From <https://developer.transportapi.com/> |
+| `SCROLL_SPEED_PX` / `SCROLL_TICK_MS` | `2` / `40` | Scroll speed |
+
+**Stockport profile**:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
@@ -81,6 +110,36 @@ Key settings:
 | `POLL_INTERVAL_SECONDS` | `180` | 3 min -> ~260 reqs/day inside a 13h window |
 | `POLL_WINDOW` | `(7, 20)` | Only poll between these hours (local) |
 | `AMBER_RGB` | `(255, 140, 0)` | Change if you hate amber (philistine) |
+| `URGENT_FLASH_THRESHOLD` | `5` | Flash when bus is this close (min). 0 = disable |
+
+**Alexia profile**:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `ALEXIA_STOP_ATCOCODE` | `1800SG40001` | End of the road, 192 toward Piccadilly |
+| `ALEXIA_ROUTES` | `["192"]` | Routes to show |
+| `ALEXIA_DIRECTION_CONTAINS` | `"piccadilly"` | Filter to one direction. `""` disables |
+| `ALEXIA_BUS_COUNT` | `3` | How many upcoming departures to show |
+| `ALEXIA_WEATHER_LAT` / `ALEXIA_WEATHER_LON` | Stockport | Open-Meteo uses these |
+| `ALEXIA_WEATHER_POLL_SECONDS` | `600` | 10 min is plenty for a domestic forecast |
+| `ALEXIA_SLEEP_START` / `ALEXIA_SLEEP_END` | `(20,0)` / `(6,30)` | Panel blanks between these |
+| `ALEXIA_PALETTE` | 7 colours | Cycled by the `A` button |
+
+Reuses `POLL_INTERVAL_SECONDS` from the Stockport settings for TransportAPI.
+
+### Alexia profile -- buttons
+
+Both buttons live on the top edge of the Galactic Unicorn, labelled on
+the silkscreen.
+
+| Button | Single tap |
+| --- | --- |
+| `A` | Cycle display colour (wraps round) |
+| `B` | Force an immediate bus + weather refresh |
+
+Taps are edge-detected at ~25Hz, so presses of up to ~40ms register
+reliably. A 350ms window separates single from double (double-tap is
+reserved for future use).
 
 ### 5. Upload the files to the Pico via Thonny
 
@@ -90,7 +149,8 @@ Key settings:
 3. Open each file from this repo and use **File -> Save copy...** ->
    **Raspberry Pi Pico**, saving with the same filename.
 4. You need at minimum: `main.py`, `config.py`, `WIFI_CONFIG.py`,
-   `bus_api.py`, `display.py`. `test_display.py` is optional.
+   `bus_api.py`, `display.py`. For the Alexia profile also upload
+   `weather_api.py` and `buttons.py`. `test_display.py` is optional.
 5. Reset the Pico (unplug/replug, or click the red stop button then
    green play). It'll auto-run `main.py`.
 
@@ -102,10 +162,13 @@ Before even touching the Pico:
 
 ```bash
 pip install requests
-python3 test_api.py
+python3 test_api.py       # TransportAPI buses
+python3 test_weather.py   # Open-Meteo weather (Alexia profile)
 ```
 
-You should see HTTP 200 and a JSON blob containing your routes.
+`test_api.py` should print HTTP 200 and a JSON blob containing your
+routes. `test_weather.py` prints the normalised state (`RAIN NOW ENDS
+IN 45 MIN` etc.) so you can eyeball what Alexia's ticker would show.
 
 ### Verify the display without WiFi
 
@@ -165,12 +228,15 @@ flash/dim variants, the constants at the top of `display.py`.
 
 | File | What it does |
 | --- | --- |
-| `main.py` | Entry point. Runs on boot. Owns the main loop. |
-| `bus_api.py` | TransportAPI wrapper. Returns two soonest viable deps. |
-| `display.py` | `Ticker` class + message composition helpers. |
-| `config.py` | Your API keys, stop, routes, timings. Gitignored. |
+| `main.py` | Entry point. Runs on boot. Dispatches to `run_stockport()` or `run_alexia()` by `config.PROFILE`. |
+| `bus_api.py` | TransportAPI wrapper. `get_soonest_two_viable_departures` (Stockport) + `get_upcoming_departures` (Alexia). |
+| `weather_api.py` | Open-Meteo wrapper -- temperature + three-state rain summary. |
+| `display.py` | `Ticker` class + composition helpers for both profiles. |
+| `buttons.py` | Tap detector + palette cycler for the Alexia profile. |
+| `config.py` | Your API keys, profile, stop, routes, timings. Gitignored. |
 | `config.example.py` | Committed template. |
 | `WIFI_CONFIG.py` | WiFi creds. Gitignored. |
 | `WIFI_CONFIG.example.py` | Committed template. |
-| `test_api.py` | Laptop-side CPython smoke test for the API. |
+| `test_api.py` | Laptop-side CPython smoke test for TransportAPI. |
+| `test_weather.py` | Laptop-side CPython smoke test for Open-Meteo. |
 | `test_display.py` | On-Pico visual test using hardcoded data. |
