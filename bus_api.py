@@ -162,3 +162,61 @@ def get_soonest_two_viable_departures(
     first = candidates[0] if candidates else None
     second = candidates[1] if len(candidates) > 1 else None
     return first, second
+
+
+def get_upcoming_departures(
+    app_id, app_key, stop_atcocode, routes, count,
+    direction_contains=None,
+    now_local_minutes=None,
+    payload=None,
+):
+    """Return up to `count` soonest departures matching routes + direction.
+
+    Used by the Alexia profile: no walk-time subtraction, no "viable" filter --
+    it just wants the next N buses matching the route and going the right way.
+
+    Args:
+      app_id, app_key, stop_atcocode: TransportAPI parameters.
+      routes: iterable of route numbers as strings, e.g. ["192"].
+      count: max number of departures to return.
+      direction_contains: if set, only keep departures whose `direction`
+        string contains this substring (case-insensitive). e.g. "piccadilly"
+        to filter a bidirectional stop to just the inbound side.
+      now_local_minutes: optional override for testing.
+      payload: optional pre-fetched JSON (skips HTTP). Used by tests.
+
+    Returns a list of dicts:
+      [{"route": "192", "destination": "Manchester Piccadilly",
+        "minutes_until_bus": 10, "bus_time_hhmm": "07:52", "is_live": True}, ...]
+    """
+    if payload is None:
+        payload = fetch_raw(app_id, app_key, stop_atcocode)
+
+    if now_local_minutes is None:
+        now_local_minutes = _now_local_minutes()
+
+    needle = direction_contains.lower() if direction_contains else None
+
+    rows = []
+    for dep in _extract_departures(payload, routes):
+        hhmm, is_live = _pick_best_time(dep)
+        bus_mins = _hhmm_to_minutes(hhmm)
+        if bus_mins is None:
+            continue
+        minutes_until_bus = _minutes_until(now_local_minutes, bus_mins)
+        if minutes_until_bus < 0:
+            # Bus time is already behind us; skip.
+            continue
+        direction = (dep.get("direction") or "").strip()
+        if needle and needle not in direction.lower():
+            continue
+        rows.append({
+            "route": str(dep.get("line") or dep.get("line_name") or "?"),
+            "destination": direction or "?",
+            "minutes_until_bus": minutes_until_bus,
+            "bus_time_hhmm": hhmm,
+            "is_live": is_live,
+        })
+
+    rows.sort(key=lambda d: d["minutes_until_bus"])
+    return rows[:count]

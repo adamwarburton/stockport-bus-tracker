@@ -67,6 +67,27 @@ class Ticker:
         # Reset scroll so the new message starts off the right edge.
         self._scroll_x = -self.width
 
+    def update_spans(self, spans, urgent=False):
+        """Like set_spans but keeps the current scroll position.
+
+        Use when the content changes without a hard "new message" feel -- e.g.
+        the colour palette changed (Alexia's A button) or a minute ticked over
+        but the text is otherwise the same. Avoids the jump-back-to-the-right
+        flash that set_spans causes.
+        """
+        if not spans:
+            spans = [("", AMBER)]
+        self._spans = spans
+        self._span_widths = [self._measure(text) for text, _ in spans]
+        gap_width = self._measure(" " * 3)
+        new_total = sum(self._span_widths) + _GAP_BETWEEN_LOOPS_PX + gap_width
+        if new_total > 0:
+            # Keep scroll_x inside the new loop so we don't jump off-message.
+            # ticks-style modulo handles the negative startup offset too.
+            self._scroll_x = self._scroll_x % new_total
+        self._total_width = new_total
+        self._urgent = bool(urgent)
+
     def _measure(self, text):
         try:
             return self.graphics.measure_text(text, 1)
@@ -160,4 +181,81 @@ def compose_fallback(message, clock_hhmm=None):
     spans = [(message, AMBER)]
     if clock_hhmm:
         spans.append(("  {}".format(clock_hhmm), AMBER_DIM))
+    return spans
+
+
+# --- Alexia profile ----------------------------------------------------------
+
+def _dim(rgb, factor=0.4):
+    """Scale an (r,g,b) triple down so the clock reads as a quiet suffix."""
+    r, g, b = rgb
+    return (int(r * factor), int(g * factor), int(b * factor))
+
+
+def _format_weather(weather):
+    """Turn a weather dict from weather_api.get_weather() into one string.
+
+    Three states, matching the user's spec:
+      raining_now       -> "12 RAIN NOW ENDS IN 45 MIN"  (or "RAINING NOW" if no end)
+      rain_starts_in    -> "12 RAIN IN 15 MIN ENDS IN 45 MIN" (or just "RAIN IN N MIN")
+      otherwise         -> "12 NO RAIN TODAY"
+    """
+    temp = weather.get("temp_c")
+    temp_str = "{}".format(temp) if temp is not None else "--"
+
+    if weather.get("raining_now"):
+        ends = weather.get("rain_ends_in")
+        if ends is not None:
+            return "{} RAIN NOW ENDS IN {} MIN".format(temp_str, ends)
+        return "{} RAINING NOW".format(temp_str)
+
+    starts = weather.get("rain_starts_in")
+    if starts is not None:
+        ends = weather.get("rain_ends_in")
+        if ends is not None:
+            return "{} RAIN IN {} MIN ENDS IN {} MIN".format(
+                temp_str, starts, ends,
+            )
+        return "{} RAIN IN {} MIN".format(temp_str, starts)
+
+    return "{} NO RAIN TODAY".format(temp_str)
+
+
+def compose_alexia(route, upcoming_minutes, weather, clock_hhmm, colour):
+    """Build Alexia's one-row ticker in the user's current palette colour.
+
+    Layout (scrolls as one row):
+        "192  10 MIN  12 MIN  15 MIN   12 RAIN IN 15 MIN ENDS IN 45 MIN   07:42"
+
+    Args:
+      route: string, e.g. "192".
+      upcoming_minutes: list of ints -- minutes until each upcoming bus.
+        Empty list -> we show "NO BUSES".
+      weather: dict from weather_api.get_weather(), or None if unavailable.
+      clock_hhmm: current local time as "HH:MM".
+      colour: (r,g,b) tuple -- the active palette entry.
+    """
+    if upcoming_minutes:
+        times = "  ".join("{} MIN".format(m) for m in upcoming_minutes)
+        bus_part = "{}  {}".format(route, times)
+    else:
+        bus_part = "{}  NO BUSES".format(route)
+
+    if weather is None:
+        wx_part = "WEATHER OFFLINE"
+    else:
+        wx_part = _format_weather(weather)
+
+    return [
+        (bus_part + "   ", colour),
+        (wx_part, colour),
+        ("   {}".format(clock_hhmm), _dim(colour)),
+    ]
+
+
+def compose_alexia_fallback(message, colour, clock_hhmm=None):
+    """Alexia-style fallback in the user's current palette colour."""
+    spans = [(message, colour)]
+    if clock_hhmm:
+        spans.append(("   {}".format(clock_hhmm), _dim(colour)))
     return spans
