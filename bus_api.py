@@ -62,11 +62,16 @@ def _pick_best_time(dep):
     return None, False
 
 
-def fetch_raw(app_id, app_key, stop_atcocode, limit=10, timeout=15):
+def fetch_raw(app_id, app_key, stop_atcocode, limit=10, timeout=8):
     """Call TransportAPI and return parsed JSON. Caller handles exceptions.
 
     The response MUST be closed to avoid leaking sockets on MicroPython, so
     we json-decode eagerly and close before returning.
+
+    timeout is short by design -- on a captive-portal or broken network
+    urequests' connect phase is the only thing we can reliably bound, so we
+    want to bail fast and let the main loop retry rather than park for 15s
+    on every poll.
     """
     url = _BASE_URL.format(stop_atcocode)
     # Build query string manually so we don't depend on urequests' params kwarg.

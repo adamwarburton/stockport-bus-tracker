@@ -29,8 +29,12 @@ _BASE_URL = "https://api.open-meteo.com/v1/forecast"
 _RAIN_THRESHOLD_MM = 0.1
 
 
-def fetch_raw(lat, lon, timeout=15):
-    """Call Open-Meteo and return parsed JSON. Caller handles exceptions."""
+def fetch_raw(lat, lon, timeout=8):
+    """Call Open-Meteo and return parsed JSON. Caller handles exceptions.
+
+    Short timeout so a bad network (captive portal, DNS hijack, etc.) fails
+    fast and lets the main loop retry rather than parking the whole ticker.
+    """
     url = (
         "{base}?latitude={lat}&longitude={lon}"
         "&current=temperature_2m"
