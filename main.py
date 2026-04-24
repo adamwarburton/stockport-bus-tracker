@@ -326,7 +326,10 @@ def run_stockport():
 
     first = None
     second = None
-    last_poll_ms = -10**9  # force immediate poll on first iteration
+    # Force an immediate poll on the first iteration. Must be a valid ticks
+    # value; a nonsense sentinel like -10**9 doesn't work on MicroPython's
+    # 30-bit wrapping ticks -- see _force_next_poll() for the full story.
+    last_poll_ms = _force_next_poll(utime.ticks_ms(), config.POLL_INTERVAL_SECONDS)
     last_second_ms = utime.ticks_ms()
     last_minute_mark = -1   # sentinel -> forces first-minute render
     status = "OK"           # OK | OFFLINE | OUTSIDE_HOURS
@@ -387,13 +390,27 @@ def run_stockport():
         utime.sleep_ms(config.SCROLL_TICK_MS)
 
 
-# --- Alexia profile ----------------------------------------------------------
+# --- Poll-schedule helpers ---------------------------------------------------
 
 # After a failed poll, retry this many seconds later instead of waiting the
 # full poll interval. Lets the main loop recover quickly when a network blip
 # (captive portal, DNS hiccup, API 503) clears, rather than parking for 3-10
 # minutes with a stale/empty display.
 _ALEXIA_RETRY_AFTER_FAIL_SEC = 30
+
+
+def _force_next_poll(now_ms, full_interval_sec):
+    """Return a `last_poll_ms` value that makes the next poll fire immediately.
+
+    Why this helper exists: MicroPython's `ticks_ms()` on the RP2 port is a
+    30-bit wrapping counter, and `ticks_diff` is only meaningful for pairs of
+    real ticks values. Using a sentinel like -10**9 lands somewhere random in
+    the wrapped arithmetic, which means the `ticks_diff >= interval` trigger
+    doesn't fire until many hours after boot. Rolling `now_ms` back by the
+    full interval gives a valid ticks value that makes `ticks_diff` return
+    exactly `full_interval_sec * 1000`, so the next poll fires this tick.
+    """
+    return utime.ticks_add(now_ms, -full_interval_sec * 1000)
 
 
 def _schedule_retry(now_ms, full_interval_sec):
@@ -408,6 +425,9 @@ def _schedule_retry(now_ms, full_interval_sec):
     if retry >= full_interval_sec:
         return now_ms  # already shorter than the normal interval, just use now
     return utime.ticks_add(now_ms, -(full_interval_sec - retry) * 1000)
+
+
+# --- Alexia profile ----------------------------------------------------------
 
 
 def _in_sleep_window(start_hm, end_hm):
@@ -498,9 +518,11 @@ def run_alexia():
     upcoming = []
     weather = None
     status = "OK"
-    last_bus_poll_ms = -10**9
-    last_wx_poll_ms = -10**9
-    last_second_ms = utime.ticks_ms()
+    # Force immediate polls on the first iteration. See _force_next_poll().
+    _boot_ms = utime.ticks_ms()
+    last_bus_poll_ms = _force_next_poll(_boot_ms, config.POLL_INTERVAL_SECONDS)
+    last_wx_poll_ms = _force_next_poll(_boot_ms, config.ALEXIA_WEATHER_POLL_SECONDS)
+    last_second_ms = _boot_ms
     last_minute_mark = -1
     sleeping = False
 
@@ -521,8 +543,8 @@ def run_alexia():
             print("[{}] Alexia: waking".format(_hhmm_now()))
             sleeping = False
             unicorn.set_brightness(day_brightness)
-            last_bus_poll_ms = -10**9
-            last_wx_poll_ms = -10**9
+            last_bus_poll_ms = _force_next_poll(now_ms, config.POLL_INTERVAL_SECONDS)
+            last_wx_poll_ms = _force_next_poll(now_ms, config.ALEXIA_WEATHER_POLL_SECONDS)
             last_minute_mark = -1
 
         # Buttons -- poll every frame regardless of sleep so presses aren't lost,
@@ -539,8 +561,8 @@ def run_alexia():
                            in_place=True)
         if event_b == "single" and not sleeping:
             print("[{}] Alexia: force refresh".format(_hhmm_now()))
-            last_bus_poll_ms = -10**9
-            last_wx_poll_ms = -10**9
+            last_bus_poll_ms = _force_next_poll(now_ms, config.POLL_INTERVAL_SECONDS)
+            last_wx_poll_ms = _force_next_poll(now_ms, config.ALEXIA_WEATHER_POLL_SECONDS)
 
         # Asleep: don't draw, don't poll -- just idle.
         if sleeping:
