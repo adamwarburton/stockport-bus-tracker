@@ -118,7 +118,7 @@ filled in.
 | --- | --- | --- |
 | `ALEXIA_STOP_ATCOCODE` | `1800SG40001` | End of the road, 192 toward Piccadilly |
 | `ALEXIA_ROUTES` | `["192"]` | Routes to show |
-| `ALEXIA_DIRECTION_CONTAINS` | `"piccadilly"` | Filter to one direction. `""` disables |
+| `ALEXIA_DIRECTION_CONTAINS` | `"manchester"` | Filter to one direction (substring, case-insensitive). `""` disables. Must match both live + scheduled data shapes -- see config.example.py |
 | `ALEXIA_BUS_COUNT` | `3` | How many upcoming departures to show |
 | `ALEXIA_WEATHER_LAT` / `ALEXIA_WEATHER_LON` | Stockport | Open-Meteo uses these |
 | `ALEXIA_WEATHER_POLL_SECONDS` | `600` | 10 min is plenty for a domestic forecast |

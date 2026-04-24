@@ -68,7 +68,14 @@ ALEXIA_ROUTES = ["192"]
 # Direction filter -- a departure is only shown if its `direction` string
 # contains this substring (case-insensitive). Set to "" to show both
 # directions.
-ALEXIA_DIRECTION_CONTAINS = "piccadilly"
+#
+# Note on data shape: TransportAPI's live endpoint returns verbose directions
+# like "Manchester Piccadilly Gardens via Stockport", but its scheduled
+# (nextbuses=no) endpoint returns short forms like "Manchester". We fall
+# back to scheduled data when the live provider 5xx's (happens for specific
+# stops), so the filter substring must match BOTH shapes. "manchester" does;
+# "piccadilly" does not.
+ALEXIA_DIRECTION_CONTAINS = "manchester"
 
 # How many upcoming departure times to show on the ticker (e.g. 3 -> "10, 12, 15 MIN").
 ALEXIA_BUS_COUNT = 3

@@ -72,23 +72,44 @@ def fetch_raw(app_id, app_key, stop_atcocode, limit=10, timeout=8):
     urequests' connect phase is the only thing we can reliably bound, so we
     want to bail fast and let the main loop retry rather than park for 15s
     on every poll.
+
+    On a 5xx from the live (`nextbuses=yes`) endpoint -- which happens when
+    the upstream NextBuses provider flakes for a specific stop -- we retry
+    once with `nextbuses=no` to fetch scheduled timetable data instead.
+    The consumer (`_pick_best_time`) already prefers live `expected_departure_time`
+    when present and falls through to `aimed_departure_time` when it isn't,
+    so the fallback is transparent: live when available, scheduled when not.
     """
-    url = _BASE_URL.format(stop_atcocode)
-    # Build query string manually so we don't depend on urequests' params kwarg.
-    qs = "app_id={}&app_key={}&group=route&limit={}&nextbuses=yes".format(
+    base_url = _BASE_URL.format(stop_atcocode)
+    base_qs = "app_id={}&app_key={}&group=route&limit={}".format(
         app_id, app_key, limit,
     )
-    full = url + "?" + qs
-    resp = _requests.get(full, timeout=timeout)
-    try:
-        if resp.status_code != 200:
-            raise OSError("HTTP {}".format(resp.status_code))
-        return resp.json()
-    finally:
+
+    def _get_json(qs):
+        resp = _requests.get(base_url + "?" + qs, timeout=timeout)
         try:
-            resp.close()
-        except Exception:
-            pass
+            code = resp.status_code
+            if code == 200:
+                return resp.json(), 200
+            return None, code
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
+    payload, code = _get_json(base_qs + "&nextbuses=yes")
+    if payload is not None:
+        return payload
+    if not (500 <= code < 600):
+        raise OSError("HTTP {}".format(code))
+
+    # Live endpoint 5xx'd -- retry once with scheduled data.
+    print("TransportAPI live HTTP {}; falling back to scheduled timetable".format(code))
+    payload, code = _get_json(base_qs + "&nextbuses=no")
+    if payload is not None:
+        return payload
+    raise OSError("HTTP {} (live and fallback both failed)".format(code))
 
 
 def _extract_departures(payload, routes):
