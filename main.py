@@ -389,6 +389,27 @@ def run_stockport():
 
 # --- Alexia profile ----------------------------------------------------------
 
+# After a failed poll, retry this many seconds later instead of waiting the
+# full poll interval. Lets the main loop recover quickly when a network blip
+# (captive portal, DNS hiccup, API 503) clears, rather than parking for 3-10
+# minutes with a stale/empty display.
+_ALEXIA_RETRY_AFTER_FAIL_SEC = 30
+
+
+def _schedule_retry(now_ms, full_interval_sec):
+    """Return a `last_poll_ms` value that triggers the next poll in ~30s.
+
+    Works by pretending the previous poll happened `(full - retry)` seconds
+    ago, so the `ticks_diff >= full_interval` check in the main loop fires
+    after `retry` seconds. Clamps so the returned value never schedules
+    later than the normal cadence.
+    """
+    retry = _ALEXIA_RETRY_AFTER_FAIL_SEC
+    if retry >= full_interval_sec:
+        return now_ms  # already shorter than the normal interval, just use now
+    return utime.ticks_add(now_ms, -(full_interval_sec - retry) * 1000)
+
+
 def _in_sleep_window(start_hm, end_hm):
     """True if localtime is inside the Alexia sleep window.
 
@@ -541,9 +562,12 @@ def run_alexia():
                 _alexia_redraw(ticker, upcoming, weather, palette.colour, status,
                                in_place=True)
 
-        # Bus poll on schedule.
+        # Bus poll on schedule. Log BEFORE the call so a hang is visible in
+        # Thonny -- if you see "polling buses..." with no follow-up for >10s,
+        # the HTTP call parked (captive portal, DNS, TLS issue).
         if utime.ticks_diff(now_ms, last_bus_poll_ms) >= config.POLL_INTERVAL_SECONDS * 1000:
             last_bus_poll_ms = now_ms
+            print("[{}] Alexia: polling buses...".format(_hhmm_now()))
             try:
                 upcoming = _poll_alexia_buses()
                 status = "OK"
@@ -552,7 +576,12 @@ def run_alexia():
                 ))
             except Exception as e:
                 status = "OFFLINE"
-                print("[{}] Alexia bus poll failed: {}".format(_hhmm_now(), e))
+                print("[{}] Alexia bus poll failed: {} (retry in ~{}s)".format(
+                    _hhmm_now(), e, _ALEXIA_RETRY_AFTER_FAIL_SEC,
+                ))
+                last_bus_poll_ms = _schedule_retry(
+                    now_ms, config.POLL_INTERVAL_SECONDS,
+                )
                 try:
                     if not wlan.isconnected():
                         print("[{}] WiFi dropped, reconnecting".format(_hhmm_now()))
@@ -566,11 +595,17 @@ def run_alexia():
         # Weather poll on its (slower) schedule.
         if utime.ticks_diff(now_ms, last_wx_poll_ms) >= config.ALEXIA_WEATHER_POLL_SECONDS * 1000:
             last_wx_poll_ms = now_ms
+            print("[{}] Alexia: polling weather...".format(_hhmm_now()))
             try:
                 weather = _poll_alexia_weather()
                 print("[{}] Alexia wx poll ok: {}".format(_hhmm_now(), weather))
             except Exception as e:
-                print("[{}] Alexia wx poll failed: {}".format(_hhmm_now(), e))
+                print("[{}] Alexia wx poll failed: {} (retry in ~{}s)".format(
+                    _hhmm_now(), e, _ALEXIA_RETRY_AFTER_FAIL_SEC,
+                ))
+                last_wx_poll_ms = _schedule_retry(
+                    now_ms, config.ALEXIA_WEATHER_POLL_SECONDS,
+                )
                 # Keep whatever we had last; weather stays None if we never had one.
             gc.collect()
             _alexia_redraw(ticker, upcoming, weather, palette.colour, status,
